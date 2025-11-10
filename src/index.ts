@@ -16,19 +16,55 @@ const isCurrentLocation = (locationData: any) => {
 
 const locationFlow = addKeyword(EVENTS.LOCATION)
   .addAnswer('Procesando tu ubicación...', null, async (ctx: any, { flowDynamic, state }: any) => {
+    console.log('\n📍 ===== LOCATION FLOW TRIGGERED =====');
+    console.log('Context:', JSON.stringify(ctx, null, 2));
+    console.log('lastRawContext:', lastRawContext ? 'EXISTS' : 'NULL');
+    
     const userLatitude = ctx.latitude;
     const userLongitude = ctx.longitude;
     const userName = ctx.pushName || ctx.name || 'Usuario';
     const userPhone = ctx.from;
 
-    await state.update({ last_latitude: userLatitude, last_longitude: userLongitude, last_location_time: Date.now() });
+    // Validar que tenemos coordenadas
+    if (!userLatitude || !userLongitude) {
+      console.error('❌ No se encontraron coordenadas en el contexto');
+      await flowDynamic([
+        '❌ Error: No pude obtener tu ubicación.',
+        'Por favor envía tu ubicación actual de nuevo.',
+      ]);
+      return;
+    }
 
-    const locationIsCurrentLocation = isCurrentLocation(
-      lastRawContext?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.location
-    );
+    console.log(`✅ Coordenadas recibidas: ${userLatitude}, ${userLongitude}`);
+
+    // Guardar coordenadas en estado (usando el número de teléfono como clave única)
+    // IMPORTANTE: state.update() puede ser síncrono o asíncrono dependiendo de la implementación
+    try {
+      await state.update({ 
+        [`${userPhone}_last_latitude`]: userLatitude, 
+        [`${userPhone}_last_longitude`]: userLongitude, 
+        [`${userPhone}_last_location_time`]: Date.now() 
+      });
+      console.log(`💾 Coordenadas guardadas en estado para ${userPhone}`);
+    } catch (e) {
+      // Si falla con await, intentar síncrono
+      state.update({ 
+        [`${userPhone}_last_latitude`]: userLatitude, 
+        [`${userPhone}_last_longitude`]: userLongitude, 
+        [`${userPhone}_last_location_time`]: Date.now() 
+      });
+      console.log(`💾 Coordenadas guardadas en estado (síncrono) para ${userPhone}`);
+    }
+
+    // Verificar si es ubicación actual o fija
+    const locationData = lastRawContext?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.location;
+    const locationIsCurrentLocation = isCurrentLocation(locationData);
+
+    console.log('Location data from raw context:', locationData);
+    console.log('Is current location:', locationIsCurrentLocation);
 
     if (!locationIsCurrentLocation) {
-      const fixed = lastRawContext?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.location;
+      const fixed = locationData;
       const message = [
         '⚠️ *UBICACIÓN NO VÁLIDA*',
         '',
@@ -48,8 +84,29 @@ const locationFlow = addKeyword(EVENTS.LOCATION)
         '¡Inténtalo de nuevo! 🙏',
       ];
       await flowDynamic(message);
+      console.log(`❌ Ubicación rechazada: ${userName} (${userPhone}) - Ubicación fija`);
       return;
     }
+
+    console.log(`✅ Ubicación actual aceptada: ${userName} (${userPhone})`);
+
+    // Limpiar coordenadas antiguas después de 5 minutos si el usuario no responde
+    // Nota: Esto es una limpieza preventiva, las coordenadas se usarán antes si el usuario responde
+    setTimeout(() => {
+      try {
+        const savedTime = state.get(`${userPhone}_last_location_time`);
+        if (savedTime && Date.now() - savedTime > 5 * 60 * 1000) {
+          state.update({
+            [`${userPhone}_last_latitude`]: null,
+            [`${userPhone}_last_longitude`]: null,
+            [`${userPhone}_last_location_time`]: null,
+          });
+          console.log(`🧹 Coordenadas limpiadas para ${userPhone} (timeout 5min)`);
+        }
+      } catch (e) {
+        console.error('Error al limpiar coordenadas:', e);
+      }
+    }, 5 * 60 * 1000);
 
     await flowDynamic([
       '✅ Ubicación actual recibida',
@@ -66,13 +123,41 @@ const actionFlow = addKeyword(['1', '2'])
   .addAnswer('Procesando...', null, async (ctx: any, { flowDynamic, state }: any) => {
     const action = ctx.body === '1' ? 'check_in' : 'check_out';
     const userPhone = ctx.from;
-    const latitude = state.get('last_latitude');
-    const longitude = state.get('last_longitude');
+    
+    console.log(`\n🎯 ===== ACTION FLOW: ${action.toUpperCase()} =====`);
+    console.log(`Phone: ${userPhone}`);
+    
+    // Obtener coordenadas del estado usando la clave única del teléfono
+    // En BuilderBot, state.get() puede ser síncrono o asíncrono dependiendo de la implementación
+    let latitude: any, longitude: any;
+    try {
+      latitude = await state.get(`${userPhone}_last_latitude`);
+      longitude = await state.get(`${userPhone}_last_longitude`);
+    } catch (e) {
+      // Si falla con await, intentar síncrono
+      latitude = state.get(`${userPhone}_last_latitude`);
+      longitude = state.get(`${userPhone}_last_longitude`);
+    }
+
+    console.log(`Coordinates from state: ${latitude}, ${longitude}`);
+    console.log(`State keys for ${userPhone}:`, Object.keys(state.getAll?.() || {}));
 
     if (!latitude || !longitude) {
-      await flowDynamic(['❌ Error: No encontré tu ubicación.', 'Por favor envía tu ubicación actual de nuevo.']);
+      console.error('❌ No se encontraron coordenadas en el estado');
+      const allState = state.getAll?.() || {};
+      console.error(`Estado completo:`, JSON.stringify(allState, null, 2));
+      await flowDynamic([
+        '❌ Error: No encontré tu ubicación.',
+        'Por favor envía tu ubicación actual de nuevo.',
+      ]);
       return;
     }
+
+    // Limpiar coordenadas después de usarlas (opcional - comentado para debugging)
+    // await state.update({
+    //   [`${userPhone}_last_latitude`]: null,
+    //   [`${userPhone}_last_longitude`]: null,
+    // });
 
     try {
       const response = await axios.post(
@@ -136,13 +221,37 @@ const main = async () => {
   adapterProvider.server.use(express.urlencoded({ extended: true }));
 
   // Capture RAW payload for location validation (current vs fixed)
-  adapterProvider.server.use((req:any , res:any, next:any) => {
-    const payload = (req as any).body;
-    if (req.method === 'POST' && payload?.entry?.[0]?.changes?.[0]?.value?.messages) {
-      const messages = payload.entry[0].changes[0].value.messages;
-      const locationMessages = messages.filter((m: any) => m.type === 'location');
-      if (locationMessages.length > 0) {
-        lastRawContext = payload;
+  // IMPORTANTE: Este middleware debe ejecutarse ANTES de que BuilderBot procese el evento
+  adapterProvider.server.use((req: any, res: any, next: any) => {
+    if (req.method === 'POST') {
+      const payload = req.body;
+      
+      // Verificar si es un webhook de Meta con mensajes
+      if (payload?.entry?.[0]?.changes?.[0]?.value?.messages) {
+        const messages = payload.entry[0].changes[0].value.messages;
+        const locationMessages = messages.filter((m: any) => m.type === 'location');
+        
+        if (locationMessages.length > 0) {
+          console.log('\n🎯 ===== RAW PAYLOAD CAPTURADO (UBICACIÓN) =====');
+          console.log(JSON.stringify(payload, null, 2));
+          console.log('🎯 ===== FIN RAW PAYLOAD =====\n');
+          
+          // Guardar el contexto RAW ANTES de que BuilderBot lo procese
+          lastRawContext = payload;
+          
+          // Log detallado de la ubicación
+          locationMessages.forEach((msg: any, index: number) => {
+            const isCurrent = isCurrentLocation(msg.location);
+            console.log(`📍 UBICACIÓN #${index + 1}:`);
+            console.log(`  ├─ From: ${msg.from}`);
+            console.log(`  ├─ Latitude: ${msg.location.latitude}`);
+            console.log(`  ├─ Longitude: ${msg.location.longitude}`);
+            console.log(`  ├─ Type: ${isCurrent ? '✅ ACTUAL' : '❌ FIJA'}`);
+            if (msg.location.address) console.log(`  ├─ Address: ${msg.location.address}`);
+            if (msg.location.name) console.log(`  ├─ Name: ${msg.location.name}`);
+            if (msg.location.url) console.log(`  ├─ URL: ${msg.location.url}`);
+          });
+        }
       }
     }
     next();
