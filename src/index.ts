@@ -338,7 +338,13 @@ const main = async () => {
                   }
                 );
               } catch (processingMsgError: any) {
-                console.error('Error enviando mensaje de procesamiento:', processingMsgError.message);
+                // Si el error es por ventana de 24 horas, solo loguear, no fallar
+                if (processingMsgError.response?.data?.error?.code === 131047 || 
+                    processingMsgError.message?.includes('24 hours')) {
+                  console.warn(`⚠️ No se pudo enviar mensaje de procesamiento a ${msg.from}: Ventana de 24 horas expirada. El usuario debe iniciar una nueva conversación.`);
+                } else {
+                  console.error('Error enviando mensaje de procesamiento:', processingMsgError.message);
+                }
                 // Continuar aunque falle el mensaje de procesamiento
               }
               
@@ -386,37 +392,57 @@ const main = async () => {
                     '¡Que tengas un excelente día! 🎉',
                   ].filter(Boolean).join('\n');
                   
-                  await axios.post(
-                    `https://graph.facebook.com/${META_API_VERSION}/${META_NUMBER_ID}/messages`,
-                    {
-                      messaging_product: 'whatsapp',
-                      to: msg.from,
-                      type: 'text',
-                      text: { body: lines },
-                    },
-                    {
-                      headers: {
-                        'Authorization': `Bearer ${META_JWT_TOKEN}`,
-                        'Content-Type': 'application/json',
+                  try {
+                    await axios.post(
+                      `https://graph.facebook.com/${META_API_VERSION}/${META_NUMBER_ID}/messages`,
+                      {
+                        messaging_product: 'whatsapp',
+                        to: msg.from,
+                        type: 'text',
+                        text: { body: lines },
                       },
+                      {
+                        headers: {
+                          'Authorization': `Bearer ${META_JWT_TOKEN}`,
+                          'Content-Type': 'application/json',
+                        },
+                      }
+                    );
+                  } catch (whatsappError: any) {
+                    // Si el error es por ventana de 24 horas, solo loguear, no fallar
+                    if (whatsappError.response?.data?.error?.code === 131047 || 
+                        whatsappError.message?.includes('24 hours')) {
+                      console.warn(`⚠️ No se pudo enviar mensaje a ${msg.from}: Ventana de 24 horas expirada. El usuario debe iniciar una nueva conversación.`);
+                    } else {
+                      console.error('Error enviando mensaje de confirmación:', whatsappError.message);
                     }
-                  );
+                  }
                 } else {
-                  await axios.post(
-                    `https://graph.facebook.com/${META_API_VERSION}/${META_NUMBER_ID}/messages`,
-                    {
-                      messaging_product: 'whatsapp',
-                      to: msg.from,
-                      type: 'text',
-                      text: { body: `❌ ${response.data.message}\n\nSi crees que esto es un error, contacta a tu empleador.` },
-                    },
-                    {
-                      headers: {
-                        'Authorization': `Bearer ${META_JWT_TOKEN}`,
-                        'Content-Type': 'application/json',
+                  try {
+                    await axios.post(
+                      `https://graph.facebook.com/${META_API_VERSION}/${META_NUMBER_ID}/messages`,
+                      {
+                        messaging_product: 'whatsapp',
+                        to: msg.from,
+                        type: 'text',
+                        text: { body: `❌ ${response.data.message}\n\nSi crees que esto es un error, contacta a tu empleador.` },
                       },
+                      {
+                        headers: {
+                          'Authorization': `Bearer ${META_JWT_TOKEN}`,
+                          'Content-Type': 'application/json',
+                        },
+                      }
+                    );
+                  } catch (whatsappError: any) {
+                    // Si el error es por ventana de 24 horas, solo loguear, no fallar
+                    if (whatsappError.response?.data?.error?.code === 131047 || 
+                        whatsappError.message?.includes('24 hours')) {
+                      console.warn(`⚠️ No se pudo enviar mensaje de error a ${msg.from}: Ventana de 24 horas expirada. El usuario debe iniciar una nueva conversación.`);
+                    } else {
+                      console.error('Error enviando mensaje de error:', whatsappError.message);
                     }
-                  );
+                  }
                 }
                 
                 // Limpiar coordenadas del cache después de usar
